@@ -1,18 +1,48 @@
 var config = require('../../config'),
-    events = require(config.paths.corePath + '/server/events'),
-    models = require(config.paths.corePath + '/server/models'),
-    errors = require(config.paths.corePath + '/server/errors'),
-    sequence = require(config.paths.corePath + '/server/utils/sequence'),
+    events = require(config.get('paths:corePath') + '/server/events'),
+    models = require(config.get('paths:corePath') + '/server/models'),
+    errors = require(config.get('paths:corePath') + '/server/errors'),
+    logging = require(config.get('paths:corePath') + '/server/logging'),
+    sequence = require(config.get('paths:corePath') + '/server/utils/sequence'),
     moment = require('moment-timezone'),
     _ = require('lodash');
 
 /**
- * WHEN access token is created we will update last_login for user.
+ * WHEN access token is created we will update last_seen for user.
  */
 events.on('token.added', function (tokenModel) {
-    models.User.edit({last_login: moment().toDate()}, {id: tokenModel.get('user_id')})
+    models.User.edit({last_seen: moment().toDate()}, {id: tokenModel.get('user_id')})
         .catch(function (err) {
-            errors.logError(err);
+            logging.error(new errors.GhostError({err: err, level: 'critical'}));
+        });
+});
+
+/**
+ * WHEN user get's suspended (status=inactive), we delete his tokens to ensure
+ * he can't login anymore
+ *
+ * NOTE:
+ *   - this event get's triggered either on user update (suspended) or if an **active** user get's deleted.
+ *   - if an active user get's deleted, we have to access the previous attributes, because this is how bookshelf works
+ *     if you delete a user.
+ */
+events.on('user.deactivated', function (userModel, options) {
+    options = options || {};
+    options = _.merge({}, options, {id: userModel.id || userModel.previousAttributes().id});
+
+    if (options.importing) {
+        return;
+    }
+
+    models.Accesstoken.destroyByUser(options)
+        .then(function () {
+            return models.Refreshtoken.destroyByUser(options);
+        })
+        .catch(function (err) {
+            logging.error(new errors.GhostError({
+                err: err,
+                level: 'critical'
+            }));
         });
 });
 
@@ -21,14 +51,20 @@ events.on('token.added', function (tokenModel) {
  * - reschedule all scheduled posts
  * - draft scheduled posts, when the published_at would be in the past
  */
-events.on('settings.activeTimezone.edited', function (settingModel) {
+events.on('settings.active_timezone.edited', function (settingModel, options) {
+    options = options || {};
+    options = _.merge({}, options, {context: {internal: true}});
+
     var newTimezone = settingModel.attributes.value,
         previousTimezone = settingModel._updatedAttributes.value,
-        timezoneOffsetDiff = moment.tz(previousTimezone).utcOffset() - moment.tz(newTimezone).utcOffset(),
-        options = {context: {internal: true}};
+        timezoneOffsetDiff = moment.tz(previousTimezone).utcOffset() - moment.tz(newTimezone).utcOffset();
 
     // CASE: TZ was updated, but did not change
     if (previousTimezone === newTimezone) {
+        return;
+    }
+
+    if (options.importing) {
         return;
     }
 
@@ -73,12 +109,17 @@ events.on('settings.activeTimezone.edited', function (settingModel) {
                     };
                 })).each(function (result) {
                     if (!result.isFulfilled()) {
-                        errors.logError(result.reason());
+                        logging.error(new errors.GhostError({
+                            err: result.reason()
+                        }));
                     }
                 });
             })
             .catch(function (err) {
-                errors.logError(err);
+                logging.error(new errors.GhostError({
+                    err: err,
+                    level: 'critical'
+                }));
             });
     });
 });

@@ -5,21 +5,28 @@
 //
 // Defaults to words="50"
 
-var hbs = require('express-hbs'),
-    _   = require('lodash'),
-    getMetaDataExcerpt = require('../data/meta/excerpt');
+var proxy = require('./proxy'),
+    _ = require('lodash'),
+    SafeString = proxy.SafeString,
+    getMetaDataExcerpt = proxy.metaData.getMetaDataExcerpt;
 
-function excerpt(options) {
-    var truncateOptions = (options || {}).hash || {};
+module.exports = function excerpt(options) {
+    var truncateOptions = (options || {}).hash || {},
+        excerptText = this.custom_excerpt ? String(this.custom_excerpt) : String(this.html);
 
     truncateOptions = _.pick(truncateOptions, ['words', 'characters']);
     _.keys(truncateOptions).map(function (key) {
         truncateOptions[key] = parseInt(truncateOptions[key], 10);
     });
 
-    return new hbs.handlebars.SafeString(
-        getMetaDataExcerpt(String(this.html), truncateOptions)
-    );
-}
+    if (!_.isEmpty(this.custom_excerpt)) {
+        truncateOptions.characters = this.custom_excerpt.length;
+        if (truncateOptions.words) {
+            delete truncateOptions.words;
+        }
+    }
 
-module.exports = excerpt;
+    return new SafeString(
+        getMetaDataExcerpt(excerptText, truncateOptions)
+    );
+};

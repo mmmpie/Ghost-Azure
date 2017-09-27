@@ -4,13 +4,14 @@
 
 /*global require, module */
 
-var api         = require('../../api'),
-    config      = require('../../config'),
-    filters     = require('../../filters'),
-    templates   = require('./templates'),
+var debug = require('ghost-ignition').debug('channels:single'),
+    api = require('../../api'),
+    utils = require('../../utils'),
+    filters = require('../../filters'),
+    templates = require('./templates'),
     handleError = require('./error'),
     formatResponse = require('./format-response'),
-    postLookup     = require('./post-lookup'),
+    postLookup = require('./post-lookup'),
     setResponseContext = require('./context'),
     setRequestIsSecure = require('./secure'),
 
@@ -23,11 +24,13 @@ var api         = require('../../api'),
 * Returns a function that takes the post to be rendered.
 */
 function renderPost(req, res) {
+    debug('renderPost called');
     return function renderPost(post) {
-        var view = templates.single(req.app.get('activeTheme'), post),
+        var view = templates.single(post),
             response = formatResponse.single(post);
 
         setResponseContext(req, res, response);
+        debug('Rendering view: ' + view);
         res.render(view, response);
     };
 }
@@ -47,8 +50,16 @@ frontendControllers = {
                 return next();
             }
 
+            if (req.params.options && req.params.options.toLowerCase() === 'edit') {
+                // CASE: last param is of url is /edit, redirect to admin
+                return res.redirect(utils.url.urlJoin(utils.url.urlFor('admin'), 'editor', post.id, '/'));
+            } else if (req.params.options) {
+                // CASE: unknown options param detected. Ignore and end in 404.
+                return next();
+            }
+
             if (post.status === 'published') {
-                return res.redirect(301, config.urlFor('post', {post: post}));
+                return res.redirect(301, utils.url.urlFor('post', {post: post}));
             }
 
             setRequestIsSecure(req, post);
@@ -73,7 +84,7 @@ frontendControllers = {
 
             // CASE: last param is of url is /edit, redirect to admin
             if (lookup.isEditURL) {
-                return res.redirect(config.paths.subdir + '/ghost/editor/' + post.id + '/');
+                return res.redirect(utils.url.urlJoin(utils.url.urlFor('admin'), 'editor', post.id, '/'));
             }
 
             // CASE: permalink is not valid anymore, we redirect him permanently to the correct one

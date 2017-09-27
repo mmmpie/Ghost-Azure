@@ -1,5 +1,8 @@
 var unidecode  = require('unidecode'),
     _          = require('lodash'),
+    config = require('../config'),
+    errors = require('../errors'),
+    i18n = require('../i18n'),
     utils,
     getRandomInt;
 
@@ -48,14 +51,19 @@ utils = {
             charlen = chars.length,
             i;
 
-        for (i = 1; i < len; i = i + 1) {
+        for (i = 0; i < len; i = i + 1) {
             buf.push(chars[getRandomInt(0, charlen - 1)]);
         }
 
         return buf.join('');
     },
+
     safeString: function (string, options) {
         options = options || {};
+
+        if (string === null) {
+            string = '';
+        }
 
         // Handle the £ symbol separately, since it needs to be removed before the unicode conversion.
         string = string.replace(/£/g, '-');
@@ -85,11 +93,13 @@ utils = {
 
         return string;
     },
+
     // The token is encoded URL safe by replacing '+' with '-', '\' with '_' and removing '='
     // NOTE: the token is not encoded using valid base64 anymore
     encodeBase64URLsafe: function (base64String) {
         return base64String.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     },
+
     // Decode url safe base64 encoding and add padding ('=')
     decodeBase64URLsafe: function (base64String) {
         base64String = base64String.replace(/-/g, '+').replace(/_/g, '/');
@@ -98,15 +108,45 @@ utils = {
         }
         return base64String;
     },
+
     redirect301: function redirect301(res, path) {
         /*jslint unparam:true*/
-        res.set({'Cache-Control': 'public, max-age=' + utils.ONE_YEAR_S});
+        res.set({'Cache-Control': 'public, max-age=' + config.get('caching:301:maxAge')});
         res.redirect(301, path);
+    },
+
+    /**
+     * NOTE: No separate utils file, because redirects won't live forever in a JSON file, see V2 of https://github.com/TryGhost/Ghost/issues/7707
+     */
+    validateRedirects: function validateRedirects(redirects) {
+        if (!_.isArray(redirects)) {
+            throw new errors.ValidationError({
+                message: i18n.t('errors.utils.redirectsWrongFormat'),
+                help: 'https://docs.ghost.org/docs/redirects'
+            });
+        }
+
+        _.each(redirects, function (redirect) {
+            if (!redirect.from || !redirect.to) {
+                throw new errors.ValidationError({
+                    message: i18n.t('errors.utils.redirectsWrongFormat'),
+                    context: JSON.stringify(redirect),
+                    help: 'https://docs.ghost.org/docs/redirects'
+                });
+            }
+        });
     },
 
     readCSV: require('./read-csv'),
     removeOpenRedirectFromUrl: require('./remove-open-redirect-from-url'),
-    zipFolder: require('./zip-folder')
+    zipFolder: require('./zip-folder'),
+    generateAssetHash: require('./asset-hash'),
+    url: require('./url'),
+    tokens: require('./tokens'),
+    sequence: require('./sequence'),
+    ghostVersion: require('./ghost-version'),
+    mobiledocConverter: require('./mobiledoc-converter'),
+    markdownConverter: require('./markdown-converter')
 };
 
 module.exports = utils;

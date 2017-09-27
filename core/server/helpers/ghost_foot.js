@@ -5,24 +5,28 @@
 //
 // We use the name ghost_foot to match the helper for consistency:
 // jscs:disable requireCamelCaseOrUpperCaseIdentifiers
+var proxy = require('./proxy'),
+    _ = require('lodash'),
+    SafeString = proxy.SafeString,
+    filters = proxy.filters,
+    settingsCache = proxy.settingsCache;
 
-var hbs             = require('express-hbs'),
-    _               = require('lodash'),
-    filters         = require('../filters'),
-    api             = require('../api'),
-    ghost_foot;
+module.exports = function ghost_foot(options) {
+    var foot = [],
+        globalCodeinjection = settingsCache.get('ghost_foot'),
+        postCodeinjection = options.data.root && options.data.root.post ? options.data.root.post.codeinjection_foot : null;
 
-ghost_foot = function (options) {
-    /*jshint unused:false*/
-    var foot = [];
+    if (!_.isEmpty(globalCodeinjection)) {
+        foot.push(globalCodeinjection);
+    }
 
-    return api.settings.read({key: 'ghost_foot'}).then(function (response) {
-        foot.push(response.settings[0].value);
-        return filters.doFilter('ghost_foot', foot);
-    }).then(function (foot) {
-        var footString = _.reduce(foot, function (memo, item) { return memo + ' ' + item; }, '');
-        return new hbs.handlebars.SafeString(footString.trim());
-    });
+    if (!_.isEmpty(postCodeinjection)) {
+        foot.push(postCodeinjection);
+    }
+
+    return filters
+        .doFilter('ghost_foot', foot)
+        .then(function (foot) {
+            return new SafeString(foot.join(' ').trim());
+        });
 };
-
-module.exports = ghost_foot;

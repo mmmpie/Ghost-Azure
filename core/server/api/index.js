@@ -4,28 +4,31 @@
 // Ghost's JSON API is integral to the workings of Ghost, regardless of whether you want to access data internally,
 // from a theme, an app, or from an external app, you'll use the Ghost JSON API to do so.
 
-var _              = require('lodash'),
-    Promise        = require('bluebird'),
-    config         = require('../config'),
-    configuration  = require('./configuration'),
-    db             = require('./db'),
-    mail           = require('./mail'),
-    notifications  = require('./notifications'),
-    posts          = require('./posts'),
-    schedules      = require('./schedules'),
-    roles          = require('./roles'),
-    settings       = require('./settings'),
-    tags           = require('./tags'),
-    clients        = require('./clients'),
-    users          = require('./users'),
-    slugs          = require('./slugs'),
-    themes         = require('./themes'),
-    subscribers    = require('./subscribers'),
+var _ = require('lodash'),
+    Promise = require('bluebird'),
+    config = require('../config'),
+    models = require('../models'),
+    utils = require('../utils'),
+    configuration = require('./configuration'),
+    db = require('./db'),
+    mail = require('./mail'),
+    notifications = require('./notifications'),
+    posts = require('./posts'),
+    schedules = require('./schedules'),
+    roles = require('./roles'),
+    settings = require('./settings'),
+    tags = require('./tags'),
+    invites = require('./invites'),
+    redirects = require('./redirects'),
+    clients = require('./clients'),
+    users = require('./users'),
+    slugs = require('./slugs'),
+    themes = require('./themes'),
+    subscribers = require('./subscribers'),
     authentication = require('./authentication'),
-    uploads        = require('./upload'),
-    exporter       = require('../data/export'),
-    slack          = require('./slack'),
-    readThemes     = require('../utils/read-themes'),
+    uploads = require('./upload'),
+    exporter = require('../data/export'),
+    slack = require('./slack'),
 
     http,
     addHeaders,
@@ -33,27 +36,20 @@ var _              = require('lodash'),
     locationHeader,
     contentDispositionHeaderExport,
     contentDispositionHeaderSubscribers,
-    init;
+    contentDispositionHeaderRedirects;
 
-/**
- * ### Init
- * Initialise the API - populate the settings cache
- * @return {Promise(Settings)} Resolves to Settings Collection
- */
-init = function init() {
-    return settings.read({context: {internal: true}, key: 'activeTheme'})
-        .then(function initActiveTheme(response) {
-            var activeTheme = response.settings[0].value;
-            return readThemes.active(config.paths.themePath, activeTheme);
-        })
-        .then(function (result) {
-            config.set({paths: {availableThemes: result}});
-            return settings.updateSettingsCache();
-        });
-};
+function isActiveThemeUpdate(method, endpoint, result) {
+    if (endpoint === 'themes') {
+        if (method === 'PUT') {
+            return true;
+        }
 
-function isActiveThemeOverride(method, endpoint, result) {
-    return method === 'POST' && endpoint === 'themes' && result.themes && result.themes[0] && result.themes[0].active === true;
+        if (method === 'POST' && result.themes && result.themes[0] && result.themes[0].active === true) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /**
@@ -80,11 +76,8 @@ cacheInvalidationHeader = function cacheInvalidationHeader(req, result) {
         hasStatusChanged,
         wasPublishedUpdated;
 
-    if (isActiveThemeOverride(method, endpoint, result)) {
+    if (isActiveThemeUpdate(method, endpoint, result)) {
         // Special case for if we're overwriting an active theme
-        // @TODO: remove these crazy DIRTY HORRIBLE HACKSSS
-        req.app.set('activeTheme', null);
-        config.assetHash = null;
         return INVALIDATE_ALL;
     } else if (['POST', 'PUT', 'DELETE'].indexOf(method) > -1) {
         if (endpoint === 'schedules' && subdir === 'posts') {
@@ -109,7 +102,7 @@ cacheInvalidationHeader = function cacheInvalidationHeader(req, result) {
             if (hasStatusChanged || wasPublishedUpdated) {
                 return INVALIDATE_ALL;
             } else {
-                return config.urlFor({relativeUrl: '/' + config.routeKeywords.preview + '/' + post.uuid + '/'});
+                return utils.url.urlFor({relativeUrl: utils.url.urlJoin('/', config.get('routeKeywords').preview, post.uuid, '/')});
             }
         }
     }
@@ -127,23 +120,25 @@ cacheInvalidationHeader = function cacheInvalidationHeader(req, result) {
  * @return {String} Resolves to header string
  */
 locationHeader = function locationHeader(req, result) {
-    var apiRoot = config.urlFor('api'),
+    var apiRoot = utils.url.urlFor('api'),
         location,
-        newObject;
+        newObject,
+        statusQuery;
 
     if (req.method === 'POST') {
         if (result.hasOwnProperty('posts')) {
             newObject = result.posts[0];
-            location = apiRoot + '/posts/' + newObject.id + '/?status=' + newObject.status;
+            statusQuery = '/?status=' + newObject.status;
+            location = utils.url.urlJoin(apiRoot, 'posts', newObject.id, statusQuery);
         } else if (result.hasOwnProperty('notifications')) {
             newObject = result.notifications[0];
-            location = apiRoot + '/notifications/' + newObject.id + '/';
+            location = utils.url.urlJoin(apiRoot, 'notifications', newObject.id, '/');
         } else if (result.hasOwnProperty('users')) {
             newObject = result.users[0];
-            location = apiRoot + '/users/' + newObject.id + '/';
+            location = utils.url.urlJoin(apiRoot, 'users', newObject.id, '/');
         } else if (result.hasOwnProperty('tags')) {
             newObject = result.tags[0];
-            location = apiRoot + '/tags/' + newObject.id + '/';
+            location = utils.url.urlJoin(apiRoot, 'tags', newObject.id, '/');
         }
     }
 
@@ -174,6 +169,10 @@ contentDispositionHeaderExport = function contentDispositionHeaderExport() {
 contentDispositionHeaderSubscribers = function contentDispositionHeaderSubscribers() {
     var datetime = (new Date()).toJSON().substring(0, 10);
     return Promise.resolve('Attachment; filename="subscribers.' + datetime + '.csv"');
+};
+
+contentDispositionHeaderRedirects = function contentDispositionHeaderRedirects() {
+    return Promise.resolve('Attachment; filename="redirects.json"');
 };
 
 addHeaders = function addHeaders(apiMethod, req, res, result) {
@@ -217,6 +216,18 @@ addHeaders = function addHeaders(apiMethod, req, res, result) {
             });
     }
 
+    // Add Redirects Content-Disposition Header
+    if (apiMethod === redirects.download) {
+        contentDisposition = contentDispositionHeaderRedirects()
+            .then(function contentDispositionHeaderRedirects(header) {
+                res.set({
+                    'Content-Disposition': header,
+                    'Content-Type': 'application/json',
+                    'Content-Length': JSON.stringify(result).length
+                });
+            });
+    }
+
     return contentDisposition;
 };
 
@@ -234,10 +245,12 @@ http = function http(apiMethod) {
     return function apiHandler(req, res, next) {
         // We define 2 properties for using as arguments in API calls:
         var object = req.body,
-            options = _.extend({}, req.file, req.query, req.params, {
+            options = _.extend({}, req.file, {ip: req.ip}, req.query, req.params, {
                 context: {
-                    user: ((req.user && req.user.id) || (req.user && req.user.id === 0)) ? req.user.id : null,
-                    client: (req.client && req.client.slug) ? req.client.slug : null
+                    // @TODO: forward the client and user obj in 1.0 (options.context.user.id)
+                    user: ((req.user && req.user.id) || (req.user && models.User.isExternalUser(req.user.id))) ? req.user.id : null,
+                    client: (req.client && req.client.slug) ? req.client.slug : null,
+                    client_id: (req.client && req.client.id) ? req.client.id : null
                 }
             });
 
@@ -279,8 +292,6 @@ http = function http(apiMethod) {
  * ## Public API
  */
 module.exports = {
-    // Extras
-    init: init,
     http: http,
     // API Endpoints
     configuration: configuration,
@@ -299,7 +310,9 @@ module.exports = {
     authentication: authentication,
     uploads: uploads,
     slack: slack,
-    themes: themes
+    themes: themes,
+    invites: invites,
+    redirects: redirects
 };
 
 /**

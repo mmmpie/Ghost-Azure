@@ -9,6 +9,7 @@ var _            = require('lodash'),
     uuid         = require('uuid'),
     extract      = require('extract-zip-fork'),
     errors       = require('../../errors'),
+    logging      = require('../../logging'),
     ImageHandler    = require('./handlers/image'),
     JSONHandler     = require('./handlers/json'),
     MarkdownHandler = require('./handlers/markdown'),
@@ -108,8 +109,11 @@ _.extend(ImportManager.prototype, {
             _.each(filesToDelete, function (fileToDelete) {
                 fs.remove(fileToDelete, function (err) {
                     if (err) {
-                        errors.logError(err, i18n.t('errors.data.importer.index.couldNotCleanUpFile.error'),
-                                        i18n.t('errors.data.importer.index.couldNotCleanUpFile.context'));
+                        logging.error(new errors.GhostError({
+                            err: err,
+                            context: i18n.t('errors.data.importer.index.couldNotCleanUpFile.error'),
+                            help: i18n.t('errors.data.importer.index.couldNotCleanUpFile.context')
+                        }));
                     }
                 });
             });
@@ -148,9 +152,7 @@ _.extend(ImportManager.prototype, {
 
         // This is a temporary extra message for the old format roon export which doesn't work with Ghost
         if (oldRoonMatches.length > 0) {
-            throw new errors.UnsupportedMediaTypeError(
-                i18n.t('errors.data.importer.index.unsupportedRoonExport')
-            );
+            throw new errors.UnsupportedMediaTypeError({message: i18n.t('errors.data.importer.index.unsupportedRoonExport')});
         }
 
         // If this folder contains importable files or a content or images directory
@@ -159,12 +161,10 @@ _.extend(ImportManager.prototype, {
         }
 
         if (extMatchesAll.length < 1) {
-            throw new errors.UnsupportedMediaTypeError(
-                i18n.t('errors.data.importer.index.noContentToImport'));
+            throw new errors.UnsupportedMediaTypeError({message: i18n.t('errors.data.importer.index.noContentToImport')});
         }
 
-        throw new errors.UnsupportedMediaTypeError(
-            i18n.t('errors.data.importer.index.invalidZipStructure'));
+        throw new errors.UnsupportedMediaTypeError({message: i18n.t('errors.data.importer.index.invalidZipStructure')});
     },
     /**
      * Use the extract module to extract the given zip file to a temp directory & return the temp directory path
@@ -211,8 +211,9 @@ _.extend(ImportManager.prototype, {
             this.getExtensionGlob(this.getExtensions(), ALL_DIRS), {cwd: directory}
         );
         if (extMatchesAll.length < 1 || extMatchesAll[0].split('/') < 1) {
-            throw new errors.ValidationError(i18n.t('errors.data.importer.index.invalidZipFileBaseDirectory'));
+            throw new errors.ValidationError({message: i18n.t('errors.data.importer.index.invalidZipFileBaseDirectory')});
         }
+
         return extMatchesAll[0].split('/')[0];
     },
     /**
@@ -238,9 +239,9 @@ _.extend(ImportManager.prototype, {
             _.each(self.handlers, function (handler) {
                 if (importData.hasOwnProperty(handler.type)) {
                     // This limitation is here to reduce the complexity of the importer for now
-                    return Promise.reject(new errors.UnsupportedMediaTypeError(
-                        i18n.t('errors.data.importer.index.zipContainsMultipleDataFormats')
-                    ));
+                    return Promise.reject(new errors.UnsupportedMediaTypeError({
+                        message: i18n.t('errors.data.importer.index.zipContainsMultipleDataFormats')
+                    }));
                 }
 
                 var files = self.getFilesFromZip(handler, zipDirectory);
@@ -255,9 +256,9 @@ _.extend(ImportManager.prototype, {
             });
 
             if (ops.length === 0) {
-                return Promise.reject(new errors.UnsupportedMediaTypeError(
-                    i18n.t('errors.data.importer.index.noContentToImport')
-                ));
+                return Promise.reject(new errors.UnsupportedMediaTypeError({
+                    message: i18n.t('errors.data.importer.index.noContentToImport')
+                }));
             }
 
             return sequence(ops).then(function () {
@@ -323,14 +324,16 @@ _.extend(ImportManager.prototype, {
      * Each importer gets passed the data from importData which has the key matching its type - i.e. it only gets the
      * data that it should import. Each importer then handles actually importing that data into Ghost
      * @param {ImportData} importData
+     * @param {importOptions} importOptions to allow override of certain import features such as locking a user
      * @returns {Promise(ImportData)}
      */
-    doImport: function (importData) {
+    doImport: function (importData, importOptions) {
+        importOptions = importOptions || {};
         var ops = [];
         _.each(this.importers, function (importer) {
             if (importData.hasOwnProperty(importer.type)) {
                 ops.push(function () {
-                    return importer.doImport(importData[importer.type]);
+                    return importer.doImport(importData[importer.type], importOptions);
                 });
             }
         });
@@ -352,9 +355,11 @@ _.extend(ImportManager.prototype, {
      * Import From File
      * The main method of the ImportManager, call this to kick everything off!
      * @param {File} file
+     * @param {importOptions} importOptions to allow override of certain import features such as locking a user
      * @returns {Promise}
      */
-    importFromFile: function (file) {
+    importFromFile: function (file, importOptions) {
+        importOptions = importOptions || {};
         var self = this;
 
         // Step 1: Handle converting the file to usable data
@@ -364,7 +369,7 @@ _.extend(ImportManager.prototype, {
         }).then(function (importData) {
             // Step 3: Actually do the import
             // @TODO: It would be cool to have some sort of dry run flag here
-            return self.doImport(importData);
+            return self.doImport(importData, importOptions);
         }).then(function (importData) {
             // Step 4: Report on the import
             return self.generateReport(importData)

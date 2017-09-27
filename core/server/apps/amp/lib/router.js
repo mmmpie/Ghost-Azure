@@ -2,18 +2,20 @@ var path                = require('path'),
     express             = require('express'),
     _                   = require('lodash'),
     ampRouter           = express.Router(),
+    i18n                = require('../../../i18n'),
 
     // Dirty requires
-    config              = require('../../../config'),
     errors              = require('../../../errors'),
+    settingsCache       = require('../../../settings/cache'),
     templates           = require('../../../controllers/frontend/templates'),
     postLookup          = require('../../../controllers/frontend/post-lookup'),
     setResponseContext  = require('../../../controllers/frontend/context');
 
 function controller(req, res, next) {
-    var defaultView = path.resolve(__dirname, 'views', 'amp.hbs'),
-        paths = templates.getActiveThemePaths(req.app.get('activeTheme')),
-        data = req.body;
+    var templateName = 'amp',
+        defaultTemplate = path.resolve(__dirname, 'views', templateName + '.hbs'),
+        view = templates.pickTemplate(templateName, defaultTemplate),
+        data = req.body || {};
 
     if (res.error) {
         data.error = res.error;
@@ -21,19 +23,19 @@ function controller(req, res, next) {
 
     setResponseContext(req, res, data);
 
-    // we have to check the context. Our context must be ['post', 'amp'], otherwise we won't render the template
-    if (_.includes(res.locals.context, 'post') && _.includes(res.locals.context, 'amp')) {
-        if (paths.hasOwnProperty('amp.hbs')) {
-            return res.render('amp', data);
-        } else {
-            return res.render(defaultView, data);
-        }
-    } else {
+    // Context check:
+    // Our context must be ['post', 'amp'], otherwise we won't render the template
+    // This prevents AMP from being rendered for pages
+    if (_.intersection(res.locals.context, ['post', 'amp']).length < 2) {
         return next();
     }
+
+    return res.render(view, data);
 }
 
 function getPostData(req, res, next) {
+    req.body = req.body || {};
+
     postLookup(res.locals.relativeUrl)
         .then(function (result) {
             if (result && result.post) {
@@ -48,7 +50,7 @@ function getPostData(req, res, next) {
 }
 
 function checkIfAMPIsEnabled(req, res, next) {
-    var ampIsEnabled = config.theme.amp;
+    var ampIsEnabled = settingsCache.get('amp');
 
     if (ampIsEnabled) {
         return next();
@@ -56,7 +58,7 @@ function checkIfAMPIsEnabled(req, res, next) {
 
     // CASE: we don't support amp pages for static pages
     if (req.body.post && req.body.post.page) {
-        return errors.error404(req, res, next);
+        return next(new errors.NotFoundError({message: i18n.t('errors.errors.pageNotFound')}));
     }
 
     /**
@@ -68,7 +70,7 @@ function checkIfAMPIsEnabled(req, res, next) {
      * and tries to lookup the post (again) and checks whether the post url equals the requested url (post.url !== req.path).
      * This check would fail if the blog is setup on a subdirectory.
      */
-    errors.error404(req, res, next);
+    return next(new errors.NotFoundError({message: i18n.t('errors.errors.pageNotFound')}));
 }
 
 // AMP frontend route

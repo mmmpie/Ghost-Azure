@@ -1,13 +1,13 @@
-var _ = require('lodash'),
-    Promise = require('bluebird'),
+var Promise = require('bluebird'),
+    _ = require('lodash'),
     moment = require('moment'),
+    pipeline = require('../utils/pipeline'),
+    apiUtils = require('./utils'),
+    models = require('../models'),
     config = require('../config'),
-    pipeline = require(config.paths.corePath + '/server/utils/pipeline'),
-    dataProvider = require(config.paths.corePath + '/server/models'),
-    i18n = require(config.paths.corePath + '/server/i18n'),
-    errors = require(config.paths.corePath + '/server/errors'),
-    apiPosts = require(config.paths.corePath + '/server/api/posts'),
-    utils = require('./utils');
+    errors = require('../errors'),
+    i18n = require('../i18n'),
+    postsAPI = require('../api/posts');
 
 /**
  * Publish a scheduled post
@@ -25,41 +25,41 @@ exports.publishPost = function publishPost(object, options) {
     }
 
     var post, publishedAtMoment,
-        publishAPostBySchedulerToleranceInMinutes = config.times.publishAPostBySchedulerToleranceInMinutes;
+        publishAPostBySchedulerToleranceInMinutes = config.get('times').publishAPostBySchedulerToleranceInMinutes;
 
     // CASE: only the scheduler client is allowed to publish (hardcoded because of missing client permission system)
     if (!options.context || !options.context.client || options.context.client !== 'ghost-scheduler') {
-        return Promise.reject(new errors.NoPermissionError(i18n.t('errors.permissions.noPermissionToAction')));
+        return Promise.reject(new errors.NoPermissionError({message: i18n.t('errors.permissions.noPermissionToAction')}));
     }
 
     options.context = {internal: true};
 
     return pipeline([
-        utils.validate('posts', {opts: utils.idDefaultOptions}),
+        apiUtils.validate('posts', {opts: apiUtils.idDefaultOptions}),
         function (cleanOptions) {
             cleanOptions.status = 'scheduled';
 
-            return dataProvider.Base.transaction(function (transacting) {
+            return models.Base.transaction(function (transacting) {
                 cleanOptions.transacting = transacting;
                 cleanOptions.forUpdate = true;
 
                 // CASE: extend allowed options, see api/utils.js
                 cleanOptions.opts = ['forUpdate', 'transacting'];
 
-                return apiPosts.read(cleanOptions)
+                return postsAPI.read(cleanOptions)
                     .then(function (result) {
                         post = result.posts[0];
                         publishedAtMoment = moment(post.published_at);
 
                         if (publishedAtMoment.diff(moment(), 'minutes') > publishAPostBySchedulerToleranceInMinutes) {
-                            return Promise.reject(new errors.NotFoundError(i18n.t('errors.api.job.notFound')));
+                            return Promise.reject(new errors.NotFoundError({message: i18n.t('errors.api.job.notFound')}));
                         }
 
                         if (publishedAtMoment.diff(moment(), 'minutes') < publishAPostBySchedulerToleranceInMinutes * -1 && object.force !== true) {
-                            return Promise.reject(new errors.NotFoundError(i18n.t('errors.api.job.publishInThePast')));
+                            return Promise.reject(new errors.NotFoundError({message: i18n.t('errors.api.job.publishInThePast')}));
                         }
 
-                        return apiPosts.edit({
+                        return postsAPI.edit({
                             posts: [{status: 'published'}]},
                             _.pick(cleanOptions, ['context', 'id', 'transacting', 'forUpdate', 'opts'])
                         );
@@ -78,7 +78,7 @@ exports.getScheduledPosts = function readPosts(options) {
     options.context = {internal: true};
 
     return pipeline([
-        utils.validate('posts', {opts: ['from', 'to']}),
+        apiUtils.validate('posts', {opts: ['from', 'to']}),
         function (cleanOptions) {
             cleanOptions.filter = 'status:scheduled';
             cleanOptions.columns = ['id', 'published_at', 'created_at'];
@@ -91,7 +91,7 @@ exports.getScheduledPosts = function readPosts(options) {
                 cleanOptions.filter += '+created_at:<=\'' + moment(cleanOptions.to).format('YYYY-MM-DD HH:mm:ss') + '\'';
             }
 
-            return dataProvider.Post.findAll(cleanOptions)
+            return models.Post.findAll(cleanOptions)
                 .then(function (result) {
                     return Promise.resolve({posts: result.models});
                 });

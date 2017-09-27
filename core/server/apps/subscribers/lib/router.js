@@ -2,26 +2,25 @@ var path                = require('path'),
     express             = require('express'),
     _                   = require('lodash'),
     subscribeRouter     = express.Router(),
+    bodyParser          = require('body-parser'),
 
     // Dirty requires
     api                 = require('../../../api'),
     errors              = require('../../../errors'),
     validator           = require('../../../data/validation').validator,
     templates           = require('../../../controllers/frontend/templates'),
-    postlookup          = require('../../../controllers/frontend/post-lookup'),
+    postLookup          = require('../../../controllers/frontend/post-lookup'),
     setResponseContext  = require('../../../controllers/frontend/context');
 
 function controller(req, res) {
-    var defaultView = path.resolve(__dirname, 'views', 'subscribe.hbs'),
-        paths = templates.getActiveThemePaths(req.app.get('activeTheme')),
+    var templateName = 'subscribe',
+        defaultTemplate = path.resolve(__dirname, 'views', templateName + '.hbs'),
+        view = templates.pickTemplate(templateName, defaultTemplate),
         data = req.body;
 
     setResponseContext(req, res);
-    if (paths.hasOwnProperty('subscribe.hbs')) {
-        return res.render('subscribe', data);
-    } else {
-        return res.render(defaultView, data);
-    }
+
+    return res.render(view, data);
 }
 
 /**
@@ -52,17 +51,17 @@ function honeyPot(req, res, next) {
     next();
 }
 
-function validateUrl(url) {
+function santizeUrl(url) {
     return validator.isEmptyOrURL(url || '') ? url : '';
 }
 
 function handleSource(req, res, next) {
-    req.body.subscribed_url = validateUrl(req.body.location);
-    req.body.subscribed_referrer = validateUrl(req.body.referrer);
+    req.body.subscribed_url = santizeUrl(req.body.location);
+    req.body.subscribed_referrer = santizeUrl(req.body.referrer);
     delete req.body.location;
     delete req.body.referrer;
 
-    postlookup(req.body.subscribed_url)
+    postLookup(req.body.subscribed_url)
         .then(function (result) {
             if (result && result.post) {
                 req.body.post_id = result.post.id;
@@ -83,9 +82,9 @@ function storeSubscriber(req, res, next) {
     req.body.status = 'subscribed';
 
     if (_.isEmpty(req.body.email)) {
-        return next(new errors.ValidationError('Email cannot be blank.'));
+        return next(new errors.ValidationError({message: 'Email cannot be blank.'}));
     } else if (!validator.isEmail(req.body.email)) {
-        return next(new errors.ValidationError('Invalid email.'));
+        return next(new errors.ValidationError({message: 'Invalid email.'}));
     }
 
     return api.subscribers.add({subscribers: [req.body]}, {context: {external: true}})
@@ -106,6 +105,7 @@ subscribeRouter.route('/')
         controller
     )
     .post(
+        bodyParser.urlencoded({extended: true}),
         honeyPot,
         handleSource,
         storeSubscriber,

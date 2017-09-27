@@ -7,12 +7,12 @@
 //
 // The data collected is as follows:
 //
-// - blog id - a hash of the blog hostname, pathname and dbHash. No identifiable info is stored.
+// - blog id - a hash of the blog hostname, pathname and db_hash. No identifiable info is stored.
 // - ghost version
 // - node version
 // - npm version
 // - env - production or development
-// - database type - SQLite, MySQL, PostgreSQL
+// - database type - SQLite, MySQL
 // - email transport - mail.options.service, or otherwise mail.transport
 // - created date - database creation date
 // - post count - total number of posts
@@ -23,32 +23,33 @@
 var crypto   = require('crypto'),
     exec     = require('child_process').exec,
     https    = require('https'),
+    http    = require('http'),
     moment   = require('moment'),
     semver   = require('semver'),
     Promise  = require('bluebird'),
     _        = require('lodash'),
     url      = require('url'),
-
     api      = require('./api'),
     config   = require('./config'),
+    utils    = require('./utils'),
+    logging  = require('./logging'),
     errors   = require('./errors'),
     i18n     = require('./i18n'),
+    currentVersion = require('./utils/ghost-version').full,
     internal = {context: {internal: true}},
-    allowedCheckEnvironments = ['development', 'production'],
-    checkEndpoint = 'updates.ghost.org',
-    currentVersion = config.ghostVersion;
+    checkEndpoint = config.get('updateCheckUrl') || 'https://updates.ghost.org';
 
-function updateCheckError(error) {
+function updateCheckError(err) {
+    err = errors.utils.deserialize(err);
+
     api.settings.edit(
-        {settings: [{key: 'nextUpdateCheck', value: Math.round(Date.now() / 1000 + 24 * 3600)}]},
+        {settings: [{key: 'next_update_check', value: Math.round(Date.now() / 1000 + 24 * 3600)}]},
         internal
     );
 
-    errors.logError(
-        error,
-        i18n.t('errors.update-check.checkingForUpdatesFailed.error'),
-        i18n.t('errors.update-check.checkingForUpdatesFailed.help', {url: 'http://docs.ghost.org/v0.11.9'})
-    );
+    err.context = i18n.t('errors.update-check.checkingForUpdatesFailed.error');
+    err.help = i18n.t('errors.update-check.checkingForUpdatesFailed.help', {url: 'https://docs.ghost.org/v1'});
+    logging.error(err);
 }
 
 /**
@@ -70,10 +71,10 @@ function createCustomNotification(message) {
         message: message.content
     },
     getAllNotifications = api.notifications.browse({context: {internal: true}}),
-    getSeenNotifications = api.settings.read(_.extend({key: 'seenNotifications'}, internal));
+    getSeenNotifications = api.settings.read(_.extend({key: 'seen_notifications'}, internal));
 
     return Promise.join(getAllNotifications, getSeenNotifications, function joined(all, seen) {
-        var isSeen      = _.includes(JSON.parse(seen.settings[0].value || []), notification.uuid),
+        var isSeen      = _.includes(JSON.parse(seen.settings[0].value || []), notification.id),
             isDuplicate = _.some(all.notifications, {message: notification.message});
 
         if (!isSeen && !isDuplicate) {
@@ -84,21 +85,21 @@ function createCustomNotification(message) {
 
 function updateCheckData() {
     var data = {},
-        mailConfig = config.mail;
+        mailConfig = config.get('mail');
 
     data.ghost_version   = currentVersion;
     data.node_version    = process.versions.node;
-    data.env             = process.env.NODE_ENV;
-    data.database_type   = config.database.client;
+    data.env             = config.get('env');
+    data.database_type   = config.get('database').client;
     data.email_transport = mailConfig &&
     (mailConfig.options && mailConfig.options.service ?
         mailConfig.options.service :
         mailConfig.transport);
 
     return Promise.props({
-        hash: api.settings.read(_.extend({key: 'dbHash'}, internal)).reflect(),
-        theme: api.settings.read(_.extend({key: 'activeTheme'}, internal)).reflect(),
-        apps: api.settings.read(_.extend({key: 'activeApps'}, internal))
+        hash: api.settings.read(_.extend({key: 'db_hash'}, internal)).reflect(),
+        theme: api.settings.read(_.extend({key: 'active_theme'}, internal)).reflect(),
+        apps: api.settings.read(_.extend({key: 'active_apps'}, internal))
             .then(function (response) {
                 var apps = response.settings[0];
 
@@ -116,7 +117,7 @@ function updateCheckData() {
             posts            = descriptors.posts.value(),
             users            = descriptors.users.value(),
             npm              = descriptors.npm.value(),
-            blogUrl          = url.parse(config.url),
+            blogUrl          = url.parse(utils.url.urlFor('home', true)),
             blogId           = blogUrl.hostname + blogUrl.pathname.replace(/\//, '') + hash.value;
 
         data.blog_id         = crypto.createHash('md5').update(blogId).digest('hex');
@@ -126,6 +127,7 @@ function updateCheckData() {
         data.user_count      = users && users.users && users.users.length ? users.users.length : 0;
         data.blog_created_at = users && users.users && users.users[0] && users.users[0].created_at ? moment(users.users[0].created_at).unix() : '';
         data.npm_version     = npm.trim();
+        data.lts             = false;
 
         return data;
     }).catch(updateCheckError);
@@ -135,7 +137,9 @@ function updateCheckRequest() {
     return updateCheckData().then(function then(reqData) {
         var resData = '',
             headers,
-            req;
+            req,
+            requestHandler,
+            parsedUrl;
 
         reqData = JSON.stringify(reqData);
 
@@ -145,8 +149,12 @@ function updateCheckRequest() {
         };
 
         return new Promise(function p(resolve, reject) {
-            req = https.request({
-                hostname: checkEndpoint,
+            requestHandler = checkEndpoint.indexOf('https') === 0 ? https : http;
+            parsedUrl = url.parse(checkEndpoint);
+
+            req = requestHandler.request({
+                hostname: parsedUrl.hostname,
+                port: parsedUrl.port,
                 method: 'POST',
                 headers: headers
             }, function handler(res) {
@@ -155,6 +163,11 @@ function updateCheckRequest() {
                 res.on('end', function onEnd() {
                     try {
                         resData = JSON.parse(resData);
+
+                        if (this.statusCode >= 400) {
+                            return reject(resData);
+                        }
+
                         resolve(resData);
                     } catch (e) {
                         reject(i18n.t('errors.update-check.unableToDecodeUpdateResponse.error'));
@@ -198,25 +211,24 @@ function updateCheckRequest() {
  */
 function updateCheckResponse(response) {
     return Promise.all([
-        api.settings.edit({settings: [{key: 'nextUpdateCheck', value: response.next_check}]}, internal),
-        api.settings.edit({settings: [{key: 'displayUpdateNotification', value: response.version}]}, internal)
+        api.settings.edit({settings: [{key: 'next_update_check', value: response.next_check}]}, internal),
+        api.settings.edit({settings: [{key: 'display_update_notification', value: response.version}]}, internal)
     ]).then(function () {
         var messages = response.messages || [];
+
+        /**
+         * by default the update check service returns messages: []
+         * but the latest release version get's stored anyway, because we adding the `display_update_notification` ^
+         */
         return Promise.map(messages, createCustomNotification);
     });
 }
 
 function updateCheck() {
-    // The check will not happen if:
-    // 1. updateCheck is defined as false in config.js
-    // 2. we've already done a check this session
-    // 3. we're not in production or development mode
-    // TODO: need to remove config.updateCheck in favor of config.privacy.updateCheck in future version (it is now deprecated)
-    if (config.updateCheck === false || config.isPrivacyDisabled('useUpdateCheck') || _.indexOf(allowedCheckEnvironments, process.env.NODE_ENV) === -1) {
-        // No update check
+    if (config.isPrivacyDisabled('useUpdateCheck')) {
         return Promise.resolve();
     } else {
-        return api.settings.read(_.extend({key: 'nextUpdateCheck'}, internal)).then(function then(result) {
+        return api.settings.read(_.extend({key: 'next_update_check'}, internal)).then(function then(result) {
             var nextUpdateCheck = result.settings[0];
 
             if (nextUpdateCheck && nextUpdateCheck.value && nextUpdateCheck.value > moment().unix()) {
@@ -233,17 +245,11 @@ function updateCheck() {
 }
 
 function showUpdateNotification() {
-    return api.settings.read(_.extend({key: 'displayUpdateNotification'}, internal)).then(function then(response) {
+    return api.settings.read(_.extend({key: 'display_update_notification'}, internal)).then(function then(response) {
         var display = response.settings[0];
 
-        // Version 0.4 used boolean to indicate the need for an update. This special case is
-        // translated to the version string.
-        // TODO: remove in future version.
-        if (display.value === 'false' || display.value === 'true' || display.value === '1' || display.value === '0') {
-            display.value = '0.4.0';
-        }
-
-        if (display && display.value && currentVersion && semver.gt(display.value, currentVersion)) {
+        // @TODO: We only show minor/major releases. This is a temporary fix. #5071 is coming soon.
+        if (display && display.value && currentVersion && semver.gt(display.value, currentVersion) && semver.patch(display.value) === 0) {
             return display.value;
         }
 

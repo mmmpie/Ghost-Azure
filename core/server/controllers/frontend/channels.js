@@ -2,17 +2,16 @@ var express = require('express'),
     _       = require('lodash'),
     config  = require('../../config'),
     errors  = require('../../errors'),
+    i18n    = require('../../i18n'),
     rss     = require('../../data/xml/rss'),
     utils   = require('../../utils'),
-
     channelConfig = require('./channel-config'),
     renderChannel = require('./render-channel'),
-
     rssRouter,
     channelRouter;
 
 function handlePageParam(req, res, next, page) {
-    var pageRegex = new RegExp('/' + config.routeKeywords.page + '/(.*)?/'),
+    var pageRegex = new RegExp('/' + config.get('routeKeywords').page + '/(.*)?/'),
         rssRegex = new RegExp('/rss/(.*)?/');
 
     page = parseInt(page, 10);
@@ -26,7 +25,7 @@ function handlePageParam(req, res, next, page) {
         }
     } else if (page < 1 || isNaN(page)) {
         // Nothing less than 1 is a valid page number, go straight to a 404
-        return next(new errors.NotFoundError());
+        return next(new errors.NotFoundError({message: i18n.t('errors.errors.pageNotFound')}));
     } else {
         // Set req.params.page to the already parsed number, and continue
         req.params.page = page;
@@ -36,7 +35,7 @@ function handlePageParam(req, res, next, page) {
 
 rssRouter = function rssRouter(channelConfig) {
     function rssConfigMiddleware(req, res, next) {
-        req.channelConfig.isRSS = true;
+        res.locals.channel.isRSS = true;
         next();
     }
 
@@ -46,26 +45,26 @@ rssRouter = function rssRouter(channelConfig) {
         baseRoute = '/rss/';
 
     router.get(baseRoute, stack);
-    router.get(baseRoute + ':page/', stack);
+    router.get(utils.url.urlJoin(baseRoute, ':page(\\d+)/'), stack);
     router.get('/feed/', function redirectToRSS(req, res) {
-        return utils.redirect301(res, config.paths.subdir + req.baseUrl + baseRoute);
+        return utils.redirect301(res, utils.url.urlJoin(utils.url.getSubdir(), req.baseUrl, baseRoute));
     });
-    router.param('page', handlePageParam);
 
+    router.param('page', handlePageParam);
     return router;
 };
 
 channelRouter = function router() {
     function channelConfigMiddleware(channel) {
         return function doChannelConfig(req, res, next) {
-            req.channelConfig = _.cloneDeep(channel);
+            res.locals.channel = _.cloneDeep(channel);
             next();
         };
     }
 
     var channelsRouter = express.Router({mergeParams: true}),
         baseRoute = '/',
-        pageRoute = '/' + config.routeKeywords.page + '/:page/';
+        pageRoute = utils.url.urlJoin('/', config.get('routeKeywords').page, ':page(\\d+)/');
 
     _.each(channelConfig.list(), function (channel) {
         var channelRouter = express.Router({mergeParams: true}),
@@ -73,13 +72,21 @@ channelRouter = function router() {
 
         // @TODO figure out how to collapse this into a single rule
         channelRouter.get(baseRoute, configChannel, renderChannel);
-        channelRouter.get(pageRoute, configChannel, renderChannel);
-        channelRouter.param('page', handlePageParam);
-        channelRouter.use(rssRouter(configChannel));
+
+        // @TODO improve config and add defaults to make this simpler
+        if (channel.paged !== false) {
+            channelRouter.param('page', handlePageParam);
+            channelRouter.get(pageRoute, configChannel, renderChannel);
+        }
+
+        // @TODO improve config and add defaults to make this simpler
+        if (channel.rss !== false) {
+            channelRouter.use(rssRouter(configChannel));
+        }
 
         if (channel.editRedirect) {
             channelRouter.get('/edit/', function redirect(req, res) {
-                res.redirect(config.paths.subdir + channel.editRedirect.replace(':slug', req.params.slug));
+                res.redirect(utils.url.urlJoin(utils.url.getSubdir(), channel.editRedirect.replace(':slug', req.params.slug)));
             });
         }
 

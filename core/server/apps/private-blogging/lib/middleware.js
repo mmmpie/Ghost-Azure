@@ -1,16 +1,14 @@
 var _           = require('lodash'),
     fs          = require('fs'),
-    config      = require('../../../config'),
+    session     = require('cookie-session'),
     crypto      = require('crypto'),
     path        = require('path'),
-    api         = require('../../../api'),
     Promise     = require('bluebird'),
-    errors      = require('../../../errors'),
-    session     = require('cookie-session'),
+    config      = require('../../../config'),
+    api         = require('../../../api'),
     utils       = require('../../../utils'),
     i18n        = require('../../../i18n'),
-    privateRoute = '/' + config.routeKeywords.private + '/',
-    protectedSecurity = [],
+    privateRoute = '/' + config.get('routeKeywords').private + '/',
     privateBlogging;
 
 function verifySessionHash(salt, hash) {
@@ -29,7 +27,7 @@ function verifySessionHash(salt, hash) {
 
 privateBlogging = {
     checkIsPrivate: function checkIsPrivate(req, res, next) {
-        return api.settings.read({context: {internal: true}, key: 'isPrivate'}).then(function then(response) {
+        return api.settings.read({context: {internal: true}, key: 'is_private'}).then(function then(response) {
             var pass = response.settings[0];
 
             if (_.isEmpty(pass.value) || pass.value === 'false') {
@@ -51,21 +49,18 @@ privateBlogging = {
             return next();
         }
 
-        // take care of rss and sitemap 404s
-        if (req.path.lastIndexOf('/rss/', 0) === 0 ||
-            req.path.lastIndexOf('/rss/') === req.url.length - 5 ||
-            (req.path.lastIndexOf('/sitemap', 0) === 0 && req.path.lastIndexOf('.xml') === req.path.length - 4)) {
-            return errors.error404(req, res, next);
-        } else if (req.url.lastIndexOf('/robots.txt', 0) === 0) {
+        if (req.url.lastIndexOf('/robots.txt', 0) === 0) {
             fs.readFile(path.resolve(__dirname, '../', 'robots.txt'), function readFile(err, buf) {
                 if (err) {
                     return next(err);
                 }
+
                 res.writeHead(200, {
                     'Content-Type': 'text/plain',
                     'Content-Length': buf.length,
-                    'Cache-Control': 'public, max-age=' + utils.ONE_HOUR_MS
+                    'Cache-Control': 'public, max-age=' + config.get('caching:robotstxt:maxAge')
                 });
+
                 res.end(buf);
             });
         } else {
@@ -82,7 +77,7 @@ privateBlogging = {
             if (isVerified) {
                 return next();
             } else {
-                url = config.urlFor({relativeUrl: privateRoute});
+                url = utils.url.urlFor({relativeUrl: privateRoute});
                 url += req.url === '/' ? '' : '?r=' + encodeURIComponent(req.url);
                 return res.redirect(url);
             }
@@ -92,7 +87,7 @@ privateBlogging = {
     // This is here so a call to /private/ after a session is verified will redirect to home;
     isPrivateSessionAuth: function isPrivateSessionAuth(req, res, next) {
         if (!res.isPrivateBlog) {
-            return res.redirect(config.urlFor('home', true));
+            return res.redirect(utils.url.urlFor('home', true));
         }
 
         var hash = req.session.token || '',
@@ -101,7 +96,7 @@ privateBlogging = {
         return verifySessionHash(salt, hash).then(function then(isVerified) {
             if (isVerified) {
                 // redirect to home if user is already authenticated
-                return res.redirect(config.urlFor('home', true));
+                return res.redirect(utils.url.urlFor('home', true));
             } else {
                 return next();
             }
@@ -127,7 +122,7 @@ privateBlogging = {
                 req.session.token = hasher.digest('hex');
                 req.session.salt = salt;
 
-                return res.redirect(config.urlFor({relativeUrl: decodeURIComponent(forward)}));
+                return res.redirect(utils.url.urlFor({relativeUrl: decodeURIComponent(forward)}));
             } else {
                 res.error = {
                     message: i18n.t('errors.middleware.privateblogging.wrongPassword')
@@ -135,46 +130,6 @@ privateBlogging = {
                 return next();
             }
         });
-    },
-
-    spamPrevention: function spamPrevention(req, res, next) {
-        var currentTime = process.hrtime()[0],
-            remoteAddress = req.connection.remoteAddress,
-            rateProtectedPeriod = config.rateProtectedPeriod || 3600,
-            rateProtectedAttempts = config.rateProtectedAttempts || 10,
-            ipCount = '',
-            message = i18n.t('errors.middleware.spamprevention.tooManyAttempts'),
-            deniedRateLimit = '',
-            password = req.body.password;
-
-        if (password) {
-            protectedSecurity.push({ip: remoteAddress, time: currentTime});
-        } else {
-            res.error = {
-                message: i18n.t('errors.middleware.spamprevention.noPassword')
-            };
-            return next();
-        }
-
-        // filter entries that are older than rateProtectedPeriod
-        protectedSecurity = _.filter(protectedSecurity, function filter(logTime) {
-            return (logTime.time + rateProtectedPeriod > currentTime);
-        });
-
-        ipCount = _.chain(protectedSecurity).countBy('ip').value();
-        deniedRateLimit = (ipCount[remoteAddress] > rateProtectedAttempts);
-
-        if (deniedRateLimit) {
-            errors.logError(
-                i18n.t('errors.middleware.spamprevention.forgottenPasswordIp.error', {rfa: rateProtectedAttempts, rfp: rateProtectedPeriod}),
-                i18n.t('errors.middleware.spamprevention.forgottenPasswordIp.context')
-            );
-            message += rateProtectedPeriod === 3600 ? i18n.t('errors.middleware.spamprevention.waitOneHour') : i18n.t('errors.middleware.spamprevention.tryAgainLater');
-            res.error = {
-                message: message
-            };
-        }
-        return next();
     }
 };
 
